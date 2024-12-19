@@ -12,6 +12,9 @@ import (
 	"github.com/lollipopkit/gommon/log"
 	"github.com/lollipopkit/gommon/sys"
 	"github.com/lollipopkit/server_box_monitor/res"
+	"github.com/shirou/gopsutil/v4/cpu"
+	"github.com/shirou/gopsutil/v4/disk"
+	"github.com/shirou/gopsutil/v4/mem"
 )
 
 var (
@@ -20,9 +23,7 @@ var (
 	ErrInvalidShellOutput = errors.New("invalid shell output")
 )
 
-var (
-	Status = new(serverStatus)
-)
+var Status = new(serverStatus)
 
 type serverStatus struct {
 	CPU         []oneCpuStatus
@@ -107,6 +108,7 @@ func (ns networkStatus) TransmitSpeed() (Size, error) {
 	diff := float64(ns.TimeSequence.New.Transmit - ns.TimeSequence.Old.Transmit)
 	return Size(diff / CheckInterval.Seconds()), nil
 }
+
 func (ns networkStatus) ReceiveSpeed() (Size, error) {
 	if ns.TimeSequence.New == nil || ns.TimeSequence.Old == nil {
 		return 0, ErrNotReady
@@ -114,9 +116,11 @@ func (ns networkStatus) ReceiveSpeed() (Size, error) {
 	diff := float64(ns.TimeSequence.New.Receive - ns.TimeSequence.Old.Receive)
 	return Size(diff / CheckInterval.Seconds()), nil
 }
+
 func (ns networkStatus) Transmit() Size {
 	return ns.TimeSequence.New.Transmit
 }
+
 func (ns networkStatus) Receive() Size {
 	return ns.TimeSequence.New.Receive
 }
@@ -134,6 +138,7 @@ func (nss AllNetworkStatus) TransmitSpeed() (Size, error) {
 	}
 	return Size(sum), nil
 }
+
 func (nss AllNetworkStatus) ReceiveSpeed() (Size, error) {
 	var sum float64
 	for _, ns := range nss {
@@ -145,6 +150,7 @@ func (nss AllNetworkStatus) ReceiveSpeed() (Size, error) {
 	}
 	return Size(sum), nil
 }
+
 func (nss AllNetworkStatus) Transmit() Size {
 	var sum float64
 	for _, ns := range nss {
@@ -152,6 +158,7 @@ func (nss AllNetworkStatus) Transmit() Size {
 	}
 	return Size(sum)
 }
+
 func (nss AllNetworkStatus) Receive() Size {
 	var sum float64
 	for _, ns := range nss {
@@ -161,12 +168,74 @@ func (nss AllNetworkStatus) Receive() Size {
 }
 
 func RefreshStatus() error {
+	envVersion := os.Getenv("ENV_VERSION")
+	if envVersion == "v2" {
+		return refreshStatusV2()
+	} else {
+		return refreshStatusV1()
+	}
+}
+
+func refreshStatusV1() error {
 	output, _ := sys.Execute("sh", res.ServerBoxShellPath)
 	err := os.WriteFile(filepath.Join(res.ServerBoxDirPath, "shell_output.log"), []byte(output), 0644)
 	if err != nil {
 		log.Warn("[STATUS] write shell output log failed: %s", err)
 	}
 	return ParseStatus(output)
+}
+
+func refreshStatusV2() error {
+	vMemory, _ := mem.VirtualMemory()
+	vSwap, _ := mem.SwapMemory()
+	fmt.Printf("Total: %v, Free:%v, UsedPercent:%f%%\n", vMemory.Total, vMemory.Free, vMemory.UsedPercent)
+	initMem()
+	initSwap()
+	Status.Mem.Avail = Size(vMemory.Available)
+	Status.Mem.Free = Size(vMemory.Free)
+	Status.Mem.Total = Size(vMemory.Total)
+	Status.Mem.Used = Size(vMemory.Used)
+
+	Status.Swap.Free = Size(vSwap.Free)
+	Status.Swap.Used = Size(vSwap.Used)
+	// Status.Swap.Cached=Size(vSwap.)
+	Status.Swap.Total = Size(vSwap.Total)
+
+	count, _ := cpu.Counts(false)
+	cpus := make([]oneCpuStatus, count)
+	Status.CPU = cpus
+	infos, _ := cpu.Times(true)
+
+	for i := range count {
+		c := convertToCpuOneTimeStatus(infos[i])
+		Status.CPU[i].Update(&c)
+	}
+	partitions, _ := disk.Partitions(true)
+	disks := make([]diskStatus, len(partitions))
+	for i := range len(partitions) {
+		usage, _ := disk.Usage(partitions[i].Mountpoint)
+		disks[i].Total = Size(usage.Total)
+		disks[i].Used = Size(usage.Used)
+		disks[i].Avail = Size(usage.Free)
+		disks[i].UsedPercent = usage.UsedPercent
+		disks[i].Filesystem = usage.Fstype
+		disks[i].MountPath = partitions[i].Mountpoint
+	}
+
+	//	type serverStatus struct {
+	//		Network     []networkStatus
+	//		Temperature []temperatureStatus
+	//	}
+	return nil
+}
+
+func convertToCpuOneTimeStatus(ts cpu.TimesStat) cpuOneTimeStatus {
+	used := int(ts.User + ts.System + ts.Nice + ts.Iowait + ts.Irq + ts.Softirq + ts.Steal + ts.Guest + ts.GuestNice)
+	total := used + int(ts.Idle)
+	return cpuOneTimeStatus{
+		Used:  used,
+		Total: total,
+	}
 }
 
 func ParseStatus(s string) error {
@@ -206,6 +275,7 @@ func initMem() {
 		Status.Mem = &memStatus{}
 	}
 }
+
 func initSwap() {
 	if Status.Swap == nil {
 		Status.Swap = &swapStatus{}

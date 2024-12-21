@@ -15,6 +15,8 @@ import (
 	"github.com/shirou/gopsutil/v4/cpu"
 	"github.com/shirou/gopsutil/v4/disk"
 	"github.com/shirou/gopsutil/v4/mem"
+	"github.com/shirou/gopsutil/v4/net"
+	"github.com/shirou/gopsutil/v4/sensors"
 )
 
 var (
@@ -168,7 +170,7 @@ func (nss AllNetworkStatus) Receive() Size {
 }
 
 func RefreshStatus() error {
-	envVersion := os.Getenv("ENV_VERSION")
+	envVersion := os.Getenv("SERVER_BOX_MONITOR_VERSION")
 	if envVersion == "v2" {
 		return refreshStatusV2()
 	} else {
@@ -188,7 +190,6 @@ func refreshStatusV1() error {
 func refreshStatusV2() error {
 	vMemory, _ := mem.VirtualMemory()
 	vSwap, _ := mem.SwapMemory()
-	fmt.Printf("Total: %v, Free:%v, UsedPercent:%f%%\n", vMemory.Total, vMemory.Free, vMemory.UsedPercent)
 	initMem()
 	initSwap()
 	Status.Mem.Avail = Size(vMemory.Available)
@@ -198,7 +199,6 @@ func refreshStatusV2() error {
 
 	Status.Swap.Free = Size(vSwap.Free)
 	Status.Swap.Used = Size(vSwap.Used)
-	// Status.Swap.Cached=Size(vSwap.)
 	Status.Swap.Total = Size(vSwap.Total)
 
 	count, _ := cpu.Counts(false)
@@ -221,11 +221,20 @@ func refreshStatusV2() error {
 		disks[i].Filesystem = usage.Fstype
 		disks[i].MountPath = partitions[i].Mountpoint
 	}
-
-	//	type serverStatus struct {
-	//		Network     []networkStatus
-	//		Temperature []temperatureStatus
-	//	}
+	orginalNets, _ := net.IOCounters(true)
+	Status.Network = make([]networkStatus, len(orginalNets))
+	for i := range len(orginalNets) {
+		Status.Network[i].Update(&networkOneTimeStatus{
+			Receive:  Size(orginalNets[i].BytesRecv),
+			Transmit: Size(orginalNets[i].BytesSent),
+		})
+	}
+	orginalTemperature, _ := sensors.SensorsTemperatures()
+	Status.Temperature = make([]temperatureStatus, len(orginalTemperature))
+	for i := range len(orginalTemperature) {
+		Status.Temperature[i].Value = orginalTemperature[i].Temperature
+		Status.Temperature[i].Name = orginalTemperature[i].SensorKey
+	}
 	return nil
 }
 
